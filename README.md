@@ -1,2 +1,2 @@
-# Equity_Return_Distributions
+# Equity Return Distributions Project
 Monte Carlo and bootstrap study of equity return distributions
