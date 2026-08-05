@@ -3,7 +3,7 @@
 Description: Analysis of equity return distributions for various asset classes
 Author: Thomas Costin (tcostin20@gmail.com)
 Date started: 8/3/2026
-Data source: TBU
+Data source: Yahoo Finance (https://finance.yahoo.com/)
 ------------------------------------------------------------------------------
 '''
 
@@ -14,7 +14,7 @@ import streamlit as st
 import sys
 from streamlit.web import cli as stcli
 
-###########################################################
+#################################################################################################################################
 def get_data(tickers:list,period_start:str,period_end:str,interval:str, output_path:str) -> None:
     '''
     Function that creates a csv file containing equity 
@@ -43,7 +43,7 @@ def get_data(tickers:list,period_start:str,period_end:str,interval:str, output_p
     # save data set to the output path
     closing_price_data.to_csv(output_path, index=True, float_format='%.2f')
 
-###########################################################
+#################################################################################################################################
 def visualize_data(output_path: str) -> None:
     '''
     Function that visualizes the equity return data for each ticker.
@@ -56,33 +56,46 @@ def visualize_data(output_path: str) -> None:
     ----------
     None
     '''
+    # switch layout to widescreen mode
+    st.set_page_config(layout="wide")
+
     # cache the data to avoid reloading it every time the app is run
     @st.cache_data
     def load_data(output_path: str) -> pd.DataFrame:
         return pd.read_csv(output_path, index_col=0, parse_dates=True)
 
-    data = load_data(output_path)
+    def get_company_name(ticker: str) -> str:
+        return yf.Ticker(ticker).info['longName']  # type: ignore
 
-    # create title page
-    st.title("Closing Price Data by Month")
+    # pull raw data from CSV file
+    raw_data = load_data(output_path)
 
-    # create a sidebar that allows the user to select inidividual tickers
-    with st.sidebar:
-        ticker = st.selectbox("Ticker:", data.columns)
+    # Resample to monthly frequency, taking the mean value of each month
+    monthly_data = raw_data.resample('ME').mean().round(2)
+
+    # define columns that will be used to position graph and ticker selection box
+    col1, col2= st.columns([4, 1])
+
+    # create a dropdown menu for the user to select ticker of interest
+    with col2:
+        ticker = st.selectbox("Ticker:", raw_data.columns)
 
     # filter data based on user selection above
-    filtered_data = data[[ticker]]
+    filtered_data = monthly_data[[ticker]]
+
+    # calculate summary statistics for each ticker
+    mean = filtered_data.mean()
+    std = filtered_data.std()
+    skew = filtered_data.skew()
+    kurt = filtered_data.kurtosis()
 
     # create two different tabs, one that shows a graph of closing price data and another that shows a table of the closing price data
-    tab1, tab2 = st.tabs(["Graph", "Table"])
+    with col1:
+        # create title page
+        st.title(f"Average Closing Price - {get_company_name(ticker)}")
+        st.line_chart(filtered_data, y_label="Avg. Closing Price ($)", color="blue")
 
-    with tab1:
-        st.bar_chart(filtered_data)
-
-    with tab2:
-        st.dataframe(filtered_data)
-
-###########################################################
+#################################################################################################################################
 def main():
     # define tickers
     tickers = ['AAPL', 'MSFT', 'GOOGL']
@@ -96,8 +109,7 @@ def main():
     # feed data into data visualization function
     visualize_data(output_path)
 
-###########################################################
-
+#################################################################################################################################
 if __name__ == "__main__":
     if st.runtime.exists(): # type: ignore
         main()
