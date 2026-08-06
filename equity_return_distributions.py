@@ -9,6 +9,7 @@ Data source: Yahoo Finance (https://finance.yahoo.com/)
 
 import yfinance as yf
 import pandas as pd
+import altair as alt
 from pathlib import Path
 import streamlit as st
 import sys
@@ -64,6 +65,7 @@ def visualize_data(output_path: str) -> None:
     def load_data(output_path: str) -> pd.DataFrame:
         return pd.read_csv(output_path, index_col=0, parse_dates=True)
 
+    # define function to pull full company name from Yahoo Finance given a ticker symbol
     def get_company_name(ticker: str) -> str:
         return yf.Ticker(ticker).info['longName']  # type: ignore
 
@@ -76,12 +78,12 @@ def visualize_data(output_path: str) -> None:
     # define columns that will be used to position graph and ticker selection box
     col1, col2= st.columns([4, 1])
 
-    # create a dropdown menu for the user to select ticker of interest
+    # create a dropdown menu for the user to select tickers of interest
     with col2:
-        ticker = st.selectbox("Ticker:", raw_data.columns)
+        tickers = st.multiselect("Tickers:", raw_data.columns, default=list(raw_data.columns))
 
     # filter data based on user selection above
-    filtered_data = monthly_data[[ticker]]
+    filtered_data = monthly_data[tickers]
 
     # calculate summary statistics for each ticker
     mean = filtered_data.mean()
@@ -89,11 +91,46 @@ def visualize_data(output_path: str) -> None:
     skew = filtered_data.skew()
     kurt = filtered_data.kurtosis()
 
-    # create two different tabs, one that shows a graph of closing price data and another that shows a table of the closing price data
     with col1:
         # create title page
-        st.title(f"Average Closing Price - {get_company_name(ticker)}")
-        st.line_chart(filtered_data, y_label="Avg. Closing Price ($)", color="blue")
+        st.title("Average Closing Price")
+
+        # create line graph
+        chart_data = filtered_data.rename(columns={t: get_company_name(t) for t in tickers})
+        date_col = chart_data.index.name or "Date"
+        long_data = chart_data.reset_index().melt(
+            id_vars=[date_col], var_name="Company", value_name="Price"
+        )
+        chart = (
+            alt.Chart(long_data)
+            .mark_line()
+            .encode(
+                x=alt.X(f"{date_col}:T", title="Date", axis=alt.Axis(format="%b-%y")),
+                y=alt.Y("Price:Q", title="Avg. Closing Price ($)"),
+                color="Company:N"
+            )
+        )
+        st.altair_chart(chart, use_container_width=True)
+
+        # create summary statistics table
+        st.subheader("Summary Statistics")
+
+        # create a DataFrame to hold the summary statistics
+        summary_stats = pd.DataFrame({
+            "Mean": mean,
+            "Standard Deviation": std,
+            "Skewness": skew,
+            "Kurtosis": kurt
+        })
+
+        # display the summary statistics table with custom column widths
+        st.dataframe(
+            summary_stats.style.format("{:.2f}"),
+            column_config={
+                "_index": st.column_config.Column(width=200),
+                **{col: st.column_config.Column(width=100) for col in summary_stats.columns}
+            }
+        )
 
 #################################################################################################################################
 def main():
