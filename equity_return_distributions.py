@@ -18,8 +18,7 @@ from streamlit.web import cli as stcli
 #################################################################################################################################
 def get_data(tickers:list,period_start:str,period_end:str,interval:str, output_path:str) -> None:
     '''
-    Function that creates a csv file containing equity 
-    return data for each ticker the user provides.
+    Function that creates a csv file containing equity return data for each ticker the user provides.
     
     Parameters
     ----------
@@ -80,7 +79,7 @@ def visualize_data(output_path: str) -> None:
 
     # create a dropdown menu for the user to select tickers of interest
     with col2:
-        tickers = st.multiselect("Tickers:", raw_data.columns, default=list(raw_data.columns))
+        tickers = st.multiselect("Ticker(s):", raw_data.columns, default=list(raw_data.columns))
 
     # filter data based on user selection above
     filtered_data = monthly_data[tickers]
@@ -93,7 +92,7 @@ def visualize_data(output_path: str) -> None:
 
     with col1:
         # create title page
-        st.title("Average Closing Price")
+        st.title("Average Closing Price by Month")
 
         # create line graph
         chart_data = filtered_data.rename(columns={t: get_company_name(t) for t in tickers})
@@ -133,6 +132,10 @@ def visualize_data(output_path: str) -> None:
         )
 
 #################################################################################################################################
+
+
+
+#################################################################################################################################
 def main():
     # define tickers
     tickers = ['AAPL', 'MSFT', 'GOOGL']
@@ -144,7 +147,7 @@ def main():
     get_data(tickers, period_start="2021-08-03", period_end="2026-08-03", interval="1d", output_path=output_path)
 
     # feed data into data visualization function
-    visualize_data(output_path)
+    #visualize_data(output_path)
 
 #################################################################################################################################
 if __name__ == "__main__":
