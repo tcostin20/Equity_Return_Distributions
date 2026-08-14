@@ -46,6 +46,139 @@ def get_data(tickers:list,period_start:str,period_end:str,interval:str, output_p
     closing_price_data.to_csv(output_path, index=True, float_format='%.2f')
 
 #################################################################################################################################
+def MLE_fit(data: pd.DataFrame) -> pd.DataFrame:
+    '''
+    Function that computes the Normal distribution parameters mu and sigma
+    for each ticker's log return series using maximum likelihood estimation.
+
+    Parameters
+    ----------
+    data (pd.DataFrame): DataFrame of closing prices, with tickers as columns and
+                         dates as the index.
+
+    Returns
+    ----------
+    pd.DataFrame: DataFrame indexed by ticker with columns 'mu', 'sigma', and 'n'
+                  holding the Normal parameters and sample size for each ticker's 
+                  log returns.
+    '''
+    # compute log returns for each ticker
+    log_returns = np.log(data / data.shift(1)).dropna() # type: ignore
+
+    # Note: we take the log return instead of simple return to ensure our distribution has
+    # bounds from negative infinity to positive infinity, which mirrors the normal
+    # distribution. A simple return would have a lower bound at negative 1. We use the
+    # "dropna()" function because the shift causes the first row of data to be NaN.
+
+    # MLE for mu is the sample mean of returns (definitional)
+    mu = log_returns.mean()
+
+    # MLE for sigma is the biased (ddof=0) sample standard deviation of returns (definitional)
+    sigma = log_returns.std(ddof=0)
+
+    # number of return observations used to fit each ticker
+    n = log_returns.count()
+
+    # combine into a single DataFrame indexed by ticker
+    MLE_fit_data = pd.DataFrame({'mu': mu, 'sigma': sigma, 'n': n})
+    return MLE_fit_data
+
+#################################################################################################################################
+def parametric_CI(MLE_fit: pd.DataFrame, alpha: float) -> pd.DataFrame:
+    '''
+    Function that generates parametric confidence intervals for the mean and variance
+    of each ticker's log return series, based on the Normal MLE fit.
+
+    Parameters
+    ----------
+    MLE_fit (pd.DataFrame): DataFrame indexed by ticker with columns 'mu', 'sigma',
+                            and 'n', as produced by MLE_fit_normal.
+    confidence (float):     The confidence level for the interval.
+
+    Returns
+    -------
+    pd.DataFrame: DataFrame indexed by ticker with columns 'mu_lower', 'mu_upper',
+                  'var_lower', and 'var_upper' holding the confidence interval bounds
+                  for the mean and variance of each ticker's log returns.
+    '''
+    # unpack fitted parameters and sample size
+    mu = MLE_fit['mu']
+    n = MLE_fit['n']
+
+    # calculate variance based on normal distribution (this uses n-1 DOF vs. n for the MLE calculation)
+    sample_var = MLE_fit['sigma']**2 * n / (n - 1)
+    sample_std = np.sqrt(sample_var)
+
+    # calculate confidence interval for mu and store upper/lower bounds in variables
+    mu_lower, mu_upper = stats.t.interval(1 - alpha, df=n - 1, loc=mu, scale=sample_std / np.sqrt(n))
+
+    # calculate critical values for variance using chi-squared distribution
+    chi2_lower = stats.chi2.ppf(alpha / 2, df=n - 1)
+    chi2_upper = stats.chi2.ppf(1 - alpha / 2, df=n - 1)
+
+    # 
+    var_lower = (n - 1) * sample_var / chi2_upper
+    var_upper = (n - 1) * sample_var / chi2_lower
+
+    # combine into a single DataFrame indexed by ticker
+    return pd.DataFrame({
+        'mu_lower': mu_lower,
+        'mu_upper': mu_upper,
+        'var_lower': var_lower,
+        'var_upper': var_upper
+    })
+
+#################################################################################################################################
+def bootstrap_CI(data: pd.DataFrame, n_boot: int, alpha: float, random_state: int) -> pd.DataFrame:
+    '''
+    Function that generates non-parametric bootstrap confidence intervals for the
+    mean and standard deviation of each ticker's log return series.
+
+    Parameters
+    ----------
+    data (pd.DataFrame): DataFrame of closing prices, with tickers as columns and
+                         dates as the index.
+    n_boot (int):        Number of bootstrap resamples to draw.
+    alpha (float):       Significance level for the interval.
+    random_state (int):  Seed for the random number generator, for reproducibility.
+
+    Returns
+    -------
+    pd.DataFrame: DataFrame indexed by ticker with columns 'mu_lower', 'mu_upper',
+                  'sigma_lower', and 'sigma_upper' holding the bootstrap confidence
+                  interval bounds for the mean and standard deviation of each
+                  ticker's log returns.
+    '''
+    # compute log returns for each ticker (keep statistic consistent across parametric and bootstrap)
+    log_returns = np.log(data / data.shift(1)).dropna() # type: ignore
+
+    # create random number generator to be used for resampling
+    random_numbers = np.random.default_rng(random_state)
+
+    results = {}
+    for ticker in log_returns.columns:
+        sample = log_returns[ticker].to_numpy() # isolate ticker data
+        n = len(sample) # define resample size
+
+        # draw n_boot resamples of size n
+        sample_indices = random_numbers.integers(0, n, size=(n_boot, n))
+        boot_samples = sample[sample_indices]
+
+        # compute mean and standard deviation on every resample
+        boot_means = boot_samples.mean(axis=1)
+        boot_stds = boot_samples.std(axis=1, ddof=1)
+
+        # input results into dictionary using the percentile method (i.e., find the 97.5% and 2.5% percentiles)
+        results[ticker] = {
+            'mu_lower': np.percentile(boot_means, 100 * alpha / 2),
+            'mu_upper': np.percentile(boot_means, 100 * (1 - alpha / 2)),
+            'sigma_lower': np.percentile(boot_stds, 100 * alpha / 2),
+            'sigma_upper': np.percentile(boot_stds, 100 * (1 - alpha / 2)),
+        }
+
+    return pd.DataFrame.from_dict(results, orient='index')
+
+#################################################################################################################################
 def visualize_data(output_path: str, MLE_params:pd.DataFrame, CI_parametric: pd.DataFrame, CI_bootstrap: pd.DataFrame) -> None:
     '''
     Function that visualizes the equity return data for each ticker.
@@ -214,139 +347,6 @@ def visualize_data(output_path: str, MLE_params:pd.DataFrame, CI_parametric: pd.
         # combine both methods into one DataFrame with grouped column headers
         ci_comparison = pd.concat({'Parametric': ci_parametric_sigma, 'Bootstrap': ci_bootstrap_renamed}, axis=1)
         st.dataframe(ci_comparison.style.format("{:.4%}"))
-
-#################################################################################################################################
-def MLE_fit(data: pd.DataFrame) -> pd.DataFrame:
-    '''
-    Function that computes the MLE-fit Normal distribution parameters (mu, sigma)
-    for each ticker's log return series.
-
-    Parameters
-    ----------
-    data (pd.DataFrame): DataFrame of closing prices, with tickers as columns and
-                         dates as the index.
-
-    Returns
-    ----------
-    pd.DataFrame: DataFrame indexed by ticker with columns 'mu', 'sigma', and 'n'
-                  holding the MLE-fit Normal parameters and sample size for each
-                  ticker's log returns.
-    '''
-    # compute log returns for each ticker
-    log_returns = np.log(data / data.shift(1)).dropna() # type: ignore
-
-    # Note: we take the log return instead of simple return to ensure our distribution has
-    # bounds from negative infinity to positive infinity, which mirrors the normal
-    # distribution. A simple return would have a lower bound at negative 1. We use the
-    # "dropna()" function because the shift causes the first row of data to be NaN.
-
-    # MLE for mu is the sample mean of returns (definitional)
-    mu = log_returns.mean()
-
-    # MLE for sigma is the biased (ddof=0) sample standard deviation of returns (definitional)
-    sigma = log_returns.std(ddof=0)
-
-    # number of return observations used to fit each ticker
-    n = log_returns.count()
-
-    # combine into a single DataFrame indexed by ticker
-    MLE_fit_data = pd.DataFrame({'mu': mu, 'sigma': sigma, 'n': n})
-    return MLE_fit_data
-
-#################################################################################################################################
-def parametric_CI(MLE_fit: pd.DataFrame, alpha: float) -> pd.DataFrame:
-    '''
-    Function that generates parametric confidence intervals for the mean and variance
-    of each ticker's log return series, based on the Normal MLE fit.
-
-    Parameters
-    ----------
-    MLE_fit (pd.DataFrame): DataFrame indexed by ticker with columns 'mu', 'sigma',
-                            and 'n', as produced by MLE_fit_normal.
-    confidence (float):     The confidence level for the interval.
-
-    Returns
-    -------
-    pd.DataFrame: DataFrame indexed by ticker with columns 'mu_lower', 'mu_upper',
-                  'var_lower', and 'var_upper' holding the confidence interval bounds
-                  for the mean and variance of each ticker's log returns.
-    '''
-    # unpack fitted parameters and sample size
-    mu = MLE_fit['mu']
-    n = MLE_fit['n']
-
-    # calculate variance based on normal distribution (this uses n-1 DOF vs. n for the MLE calculation)
-    sample_var = MLE_fit['sigma']**2 * n / (n - 1)
-    sample_std = np.sqrt(sample_var)
-
-    # calculate confidence interval for mu and store upper/lower bounds in variables
-    mu_lower, mu_upper = stats.t.interval(1 - alpha, df=n - 1, loc=mu, scale=sample_std / np.sqrt(n))
-
-    # calculate critical values for variance using chi-squared distribution
-    chi2_lower = stats.chi2.ppf(alpha / 2, df=n - 1)
-    chi2_upper = stats.chi2.ppf(1 - alpha / 2, df=n - 1)
-
-    # 
-    var_lower = (n - 1) * sample_var / chi2_upper
-    var_upper = (n - 1) * sample_var / chi2_lower
-
-    # combine into a single DataFrame indexed by ticker
-    return pd.DataFrame({
-        'mu_lower': mu_lower,
-        'mu_upper': mu_upper,
-        'var_lower': var_lower,
-        'var_upper': var_upper
-    })
-
-#################################################################################################################################
-def bootstrap_CI(data: pd.DataFrame, n_boot: int, alpha: float, random_state: int) -> pd.DataFrame:
-    '''
-    Function that generates non-parametric bootstrap confidence intervals for the
-    mean and standard deviation of each ticker's log return series.
-
-    Parameters
-    ----------
-    data (pd.DataFrame): DataFrame of closing prices, with tickers as columns and
-                         dates as the index.
-    n_boot (int):        Number of bootstrap resamples to draw.
-    alpha (float):       Significance level for the interval.
-    random_state (int):  Seed for the random number generator, for reproducibility.
-
-    Returns
-    -------
-    pd.DataFrame: DataFrame indexed by ticker with columns 'mu_lower', 'mu_upper',
-                  'sigma_lower', and 'sigma_upper' holding the bootstrap confidence
-                  interval bounds for the mean and standard deviation of each
-                  ticker's log returns.
-    '''
-    # compute log returns for each ticker (keep statistic consistent across parametric and bootstrap)
-    log_returns = np.log(data / data.shift(1)).dropna() # type: ignore
-
-    # create random number generator to be used for resampling
-    random_numbers = np.random.default_rng(random_state)
-
-    results = {}
-    for ticker in log_returns.columns:
-        sample = log_returns[ticker].to_numpy() # isolate ticker data
-        n = len(sample) # define resample size
-
-        # draw n_boot resamples of size n
-        sample_indices = random_numbers.integers(0, n, size=(n_boot, n))
-        boot_samples = sample[sample_indices]
-
-        # compute mean and standard deviation on every resample
-        boot_means = boot_samples.mean(axis=1)
-        boot_stds = boot_samples.std(axis=1, ddof=1)
-
-        # input results into dictionary using the percentile method (i.e., find the 97.5% and 2.5% percentiles)
-        results[ticker] = {
-            'mu_lower': np.percentile(boot_means, 100 * alpha / 2),
-            'mu_upper': np.percentile(boot_means, 100 * (1 - alpha / 2)),
-            'sigma_lower': np.percentile(boot_stds, 100 * alpha / 2),
-            'sigma_upper': np.percentile(boot_stds, 100 * (1 - alpha / 2)),
-        }
-
-    return pd.DataFrame.from_dict(results, orient='index')
 
 #################################################################################################################################
 def main():
