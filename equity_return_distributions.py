@@ -16,6 +16,8 @@ from pathlib import Path
 import streamlit as st
 import sys
 from streamlit.web import cli as stcli
+from arch import bootstrap as ar
+import math
 
 #################################################################################################################################
 def get_data(tickers:list,period_start:str,period_end:str,interval:str, output_path:str) -> None:
@@ -131,8 +133,8 @@ def parametric_CI(MLE_fit: pd.DataFrame, alpha: float) -> pd.DataFrame:
 #################################################################################################################################
 def bootstrap_CI(data: pd.DataFrame, n_boot: int, alpha: float, random_state: int) -> pd.DataFrame:
     '''
-    Function that generates non-parametric bootstrap confidence intervals for the
-    mean and standard deviation of each ticker's log return series.
+    Function that generates non-parametric bootstrap confidence intervals 
+    for the mean and standard deviation of each ticker's log return series.
 
     Parameters
     ----------
@@ -157,7 +159,7 @@ def bootstrap_CI(data: pd.DataFrame, n_boot: int, alpha: float, random_state: in
 
     results = {}
     for ticker in log_returns.columns:
-        sample = log_returns[ticker].to_numpy() # isolate ticker data
+        sample = log_returns[ticker].to_numpy() # isolate ticker data and convert to numpy array to improve speed
         n = len(sample) # define resample size
 
         # draw n_boot resamples of size n
@@ -179,25 +181,88 @@ def bootstrap_CI(data: pd.DataFrame, n_boot: int, alpha: float, random_state: in
     return pd.DataFrame.from_dict(results, orient='index')
 
 #################################################################################################################################
-def visualize_data(output_path: str, MLE_params:pd.DataFrame, CI_parametric: pd.DataFrame, CI_bootstrap: pd.DataFrame) -> None:
+def block_bootstrap_CI(data:pd.DataFrame, n_boot: int, alpha: float, random_state: int) -> pd.DataFrame:
+    '''
+    Function that generates non-parametric block bootstrap confidence intervals 
+    for the mean and standard deviation of each ticker's log return series.
+
+    Parameters
+    ----------
+    data (pd.DataFrame): DataFrame of closing prices, with tickers as columns and
+                         dates as the index.
+    n_boot (int):        Number of bootstrap resamples to draw.
+    alpha (float):       Significance level for the interval.
+    random_state (int):  Seed for the random number generator, for reproducibility.
+
+    Returns
+    -------
+    pd.DataFrame: DataFrame indexed by ticker with columns 'mu_lower', 'mu_upper',
+                  'sigma_lower', and 'sigma_upper' holding the block bootstrap confidence
+                  interval bounds for the mean and standard deviation of each
+                  ticker's log returns.
+    '''
+    # compute log returns for each ticker (keep statistic consistent across parametric and bootstrap)
+    log_returns = np.log(data / data.shift(1)).dropna() # type: ignore
+
+    # create random number generator to be used for resampling
+    random_numbers = np.random.default_rng(random_state)
+
+    # calculate optimal block length
+    circular_block_length = ar.optimal_block_length(log_returns)['circular'].round().clip(lower=1)
+
+    results = {}
+    for ticker in log_returns.columns:
+        sample = log_returns[ticker].to_numpy() # isolate ticker data and convert to numpy array to improve speed
+        n = len(sample)
+        ticker_block_length = int(circular_block_length[ticker]) # retrieve boot length from circular block length array
+        num_blocks = math.ceil(n/ticker_block_length) # calculate number of blocks needed ensuring you have enough indicies
+
+        # generate n_boot by num_blocks matrix that contains starting indices for each block
+        block_start_positions = random_numbers.integers(0, n, size=(n_boot, num_blocks))
+
+        # expand each block start into a full block of length L, wrapping around via modulo n
+        block_offsets = np.arange(ticker_block_length) # relative positions within a block
+        block_indices = (block_start_positions[:, :, None] + block_offsets) % n  # shape (n_boot, num_blocks, L)
+
+        # flatten the blocks into full-length resamples and trim the overshoot down to exactly n columns
+        sample_indices = block_indices.reshape(n_boot, num_blocks * ticker_block_length)[:, :n]
+
+        # draw n_boot resamples of size n
+        block_boot_samples = sample[sample_indices]
+
+        # compute mean and standard deviation on every resample
+        boot_means = block_boot_samples.mean(axis=1)
+        boot_stds = block_boot_samples.std(axis=1, ddof=1)
+
+        # input results into dictionary using the percentile method (i.e., find the 97.5% and 2.5% percentiles)
+        results[ticker] = {
+            'mu_lower': np.percentile(boot_means, 100 * alpha / 2),
+            'mu_upper': np.percentile(boot_means, 100 * (1 - alpha / 2)),
+            'sigma_lower': np.percentile(boot_stds, 100 * alpha / 2),
+            'sigma_upper': np.percentile(boot_stds, 100 * (1 - alpha / 2)),
+        }
+
+    return pd.DataFrame.from_dict(results, orient='index')
+
+#################################################################################################################################
+def visualize_data(output_path: str, MLE_params:pd.DataFrame, CI_parametric: pd.DataFrame, CI_bootstrap: pd.DataFrame, CI_block_bootstrap: pd.DataFrame) -> None:
     '''
     Function that visualizes the equity return data for each ticker.
 
     Parameters
     ----------
-    output_path (str):          The path to the csv file containing the equity return data.
-    MLE_params (pd.DataFrame):  MLE-fit Normal parameters for each ticker, as produced by MLE_fit.
-    CI_parametric (pd.DataFrame): Parametric confidence intervals for each ticker, as produced by parametric_CI.
-    CI_bootstrap (pd.DataFrame):  Bootstrap confidence intervals for each ticker, as produced by bootstrap_CI.
+    output_path (str):            The path to the csv file containing the equity return data.
+    MLE_params (pd.DataFrame):    MLE-fit Normal parameters for each ticker.
+    CI_parametric (pd.DataFrame): Parametric confidence intervals for each ticker.
+    CI_bootstrap (pd.DataFrame):  Bootstrap confidence intervals for each ticker.
+    CI_block_bootstrap (pd.DataFrame): Block bootstrap confidence intervals for each ticker.
 
     Returns
     ----------
     None
     '''
-    # fixed categorical palette (blue, orange, aqua) - validated for colorblind-safety
-    # and contrast via the dataviz skill's validator; assigned in this order so ticker
-    # identity/color stays stable regardless of which tickers are selected
-    CHART_PALETTE = ['#2a78d6', '#eb6834', '#1baf7a', '#eda100', '#e87ba4', '#008300', '#4a3aa7', '#e34948']
+    # single color used for the histogram bars, regardless of the selected ticker
+    BAR_COLOR = '#2a78d6'
 
     # switch layout to widescreen mode
     st.set_page_config(layout="wide", page_title="Equity Return Distributions")
@@ -255,98 +320,184 @@ def visualize_data(output_path: str, MLE_params:pd.DataFrame, CI_parametric: pd.
     # pull raw daily data from CSV file
     raw_data = load_data(output_path)
 
-    # Resample to monthly frequency, taking the mean value of each month (for the price chart only)
-    monthly_data = raw_data.resample('ME').mean().round(2)
-
     st.title("Equity Return Distributions")
-    st.caption("MLE-fit Normal parameters and confidence intervals for daily log returns.")
+    st.caption("All data is sourced from Yahoo Finance via the yfinance library")
 
-    # define columns that will be used to position graph and ticker selection box
-    col1, col2 = st.columns([4, 1])
-
-    # create a dropdown menu for the user to select tickers of interest
-    with col2:
-        tickers = st.multiselect("Ticker(s):", raw_data.columns, default=list(raw_data.columns))
-
-    if not tickers:
-        st.warning("Select at least one ticker to see the analysis.")
-        return
-
-    # filter data based on user selection
-    filtered_monthly = monthly_data[tickers]
+    # always analyze the full ticker universe
+    tickers = list(raw_data.columns)
     mle_params = MLE_params.loc[tickers]
 
-    # fixed color scale keyed to the full ticker universe (not just the current
-    # selection), so a ticker's color never changes when the selection changes
+    # daily log returns, matching the series the confidence intervals are computed on
+    log_returns = np.log(raw_data / raw_data.shift(1)).dropna() # type: ignore
+    filtered_log_returns = log_returns[tickers]
+
+    # map tickers to company names for display
     company_names = {t: get_company_name(t) for t in raw_data.columns}
-    color_scale = alt.Scale(domain=list(company_names.values()), range=CHART_PALETTE[:len(company_names)])
 
-    with col1:
-        # create line graph
-        chart_data = filtered_monthly.rename(columns=company_names)
-        date_col = chart_data.index.name or "Date"
-        long_data = chart_data.reset_index().melt(
-            id_vars=[date_col], var_name="Company", value_name="Price"
+    # dropdown to pick a single ticker for the return distribution histogram
+    selected_ticker = st.selectbox(
+        "Select a ticker",
+        options=tickers,
+        format_func=lambda t: company_names[t],
+        width=250
+    )
+
+    # build a density histogram (bar heights integrate to 1, not raw counts) so the
+    # shape is directly comparable to a fitted normal PDF regardless of sample size
+    selected_returns = log_returns[selected_ticker]
+    hist_counts, bin_edges = np.histogram(selected_returns, bins="auto", density=True)
+    hist_data = pd.DataFrame({
+        "bin_left": bin_edges[:-1],
+        "bin_right": bin_edges[1:],
+        "density": hist_counts
+    })
+
+    # fitted normal PDF using this ticker's MLE mu/sigma, evaluated across the
+    # histogram's range, so the overlay lines up with the empirical bars
+    mu = mle_params.loc[selected_ticker, 'mu']
+    sigma = mle_params.loc[selected_ticker, 'sigma']
+    x_grid = np.linspace(bin_edges[0], bin_edges[-1], 200)
+    normal_curve = pd.DataFrame({
+        "log_return": x_grid,
+        "density": stats.norm.pdf(x_grid, loc=mu, scale=sigma)
+    })
+
+    st.subheader(f"Daily Log Return Distribution — {company_names[selected_ticker]}")
+    histogram = (
+        alt.Chart(hist_data)
+        .mark_bar(color=BAR_COLOR)
+        .encode(
+            x=alt.X("bin_left:Q", bin="binned", title=None, axis=alt.Axis(
+                format="%", gridColor="#e1e0d9", domainColor="#c3c2b7",
+                tickColor="#c3c2b7", labelColor="#52514e", titleColor="#0b0b0b")),
+            x2="bin_right:Q",
+            y=alt.Y("density:Q", title="Density", axis=alt.Axis(
+                gridColor="#e1e0d9", domainColor="#c3c2b7",
+                tickColor="#c3c2b7", labelColor="#52514e", titleColor="#0b0b0b")),
+            tooltip=[
+                alt.Tooltip("bin_left:Q", title="Bin Start", format=".2%"),
+                alt.Tooltip("bin_right:Q", title="Bin End", format=".2%"),
+                alt.Tooltip("density:Q", title="Density", format=".2f"),
+            ]
         )
-        chart = (
-            alt.Chart(long_data)
-            .mark_line(strokeWidth=2, point=alt.OverlayMarkDef(size=50, filled=True))
-            .encode(
-                x=alt.X(f"{date_col}:T", title="Date", axis=alt.Axis(
-                    format="%b-%y", gridColor="#e1e0d9", domainColor="#c3c2b7",
-                    tickColor="#c3c2b7", labelColor="#52514e", titleColor="#0b0b0b")),
-                y=alt.Y("Price:Q", title="Avg. Closing Price ($)", axis=alt.Axis(
-                    gridColor="#e1e0d9", domainColor="#c3c2b7",
-                    tickColor="#c3c2b7", labelColor="#52514e", titleColor="#0b0b0b")),
-                color=alt.Color("Company:N", scale=color_scale, legend=alt.Legend(
-                    title="Company", labelColor="#52514e", titleColor="#0b0b0b")),
-                tooltip=[
-                    alt.Tooltip(f"{date_col}:T", title="Date", format="%b %Y"),
-                    alt.Tooltip("Company:N", title="Company"),
-                    alt.Tooltip("Price:Q", title="Price ($)", format=".2f"),
-                ]
-            )
-            .properties(background="#fcfcfb")
-            .configure_view(strokeWidth=0)
+    )
+    fitted_curve = (
+        alt.Chart(normal_curve)
+        .mark_line(color="#0b0b0b", strokeWidth=2, strokeDash=[4, 3])
+        .encode(
+            x=alt.X("log_return:Q"),
+            y=alt.Y("density:Q"),
+            tooltip=[
+                alt.Tooltip("log_return:Q", title="Log Return", format=".2%"),
+                alt.Tooltip("density:Q", title="Fitted Normal Density", format=".2f"),
+            ]
         )
-        st.altair_chart(chart, use_container_width=True)
+    )
+    st.altair_chart((histogram + fitted_curve).configure_view(strokeWidth=0), use_container_width=True)
+    st.caption("Note: dashed line is normal PDF fitted via MLE")
 
-        # create monthly closing price summary statistics table
-        st.subheader("Monthly Price Summary Statistics")
-        summary_stats = pd.DataFrame({
-            "Mean": filtered_monthly.mean(),
-            "Standard Deviation": filtered_monthly.std(),
-            "Skewness": filtered_monthly.skew(),
-            "Kurtosis": filtered_monthly.kurtosis()
-        })
-        st.dataframe(
-            summary_stats.style.format("{:.2f}"),
-            column_config={
-                "_index": st.column_config.Column(width=200),
-                **{col: st.column_config.Column(width=100) for col in summary_stats.columns}
-            }
+    # Q-Q plot comparing the selected ticker's sample quantiles against the quantiles
+    # implied by the fitted normal (mu, sigma) - points falling on the reference line
+    # indicate agreement with normality; curvature in the tails indicates fat/thin tails
+    qq_theoretical, qq_sample = stats.probplot(selected_returns, dist="norm", sparams=(mu, sigma), fit=False)
+    qq_data = pd.DataFrame({"theoretical": qq_theoretical, "sample": qq_sample})
+    qq_range = [qq_data[["theoretical", "sample"]].min().min(), qq_data[["theoretical", "sample"]].max().max()]
+    qq_reference_data = pd.DataFrame({"theoretical": qq_range, "sample": qq_range})
+
+    st.subheader(f"Normal Q-Q Plot — {company_names[selected_ticker]}")
+    qq_scatter = (
+        alt.Chart(qq_data)
+        .mark_circle(size=30, color=BAR_COLOR, opacity=0.7)
+        .encode(
+            x=alt.X("theoretical:Q", title="Theoretical Quantile (Fitted Normal)", axis=alt.Axis(
+                format="%", gridColor="#e1e0d9", domainColor="#c3c2b7",
+                tickColor="#c3c2b7", labelColor="#52514e", titleColor="#0b0b0b")),
+            y=alt.Y("sample:Q", title="Sample Quantile (Observed)", axis=alt.Axis(
+                format="%", gridColor="#e1e0d9", domainColor="#c3c2b7",
+                tickColor="#c3c2b7", labelColor="#52514e", titleColor="#0b0b0b")),
+            tooltip=[
+                alt.Tooltip("theoretical:Q", title="Theoretical", format=".2%"),
+                alt.Tooltip("sample:Q", title="Observed", format=".2%"),
+            ]
         )
+    )
+    qq_reference_line = (
+        alt.Chart(qq_reference_data)
+        .mark_line(color="#0b0b0b", strokeWidth=1.5, strokeDash=[4, 3])
+        .encode(x="theoretical:Q", y="sample:Q")
+    )
+    st.altair_chart((qq_scatter + qq_reference_line).configure_view(strokeWidth=0), use_container_width=True)
+    st.caption("Note: points on the dashed line indicate agreement with the fitted normal distribution; deviations in the tails indicate non-normality.")
 
-        # create parametric vs. bootstrap confidence interval comparison table
-        st.subheader("Confidence Intervals: Parametric vs. Bootstrap")
-        st.caption("Confidence interval comparison for the daily log-return mean (μ) and standard deviation (σ).")
+    # box-and-whisker plot of the selected ticker's daily log returns
+    box_data = pd.DataFrame({"log_return": selected_returns})
 
-        # convert the parametric variance bounds to standard deviation so both
-        # methods' intervals are directly comparable in the same units
-        ci_parametric_sigma = pd.DataFrame({
-            'μ Lower': CI_parametric.loc[tickers, 'mu_lower'],
-            'μ Upper': CI_parametric.loc[tickers, 'mu_upper'],
-            'σ Lower': np.sqrt(CI_parametric.loc[tickers, 'var_lower']),
-            'σ Upper': np.sqrt(CI_parametric.loc[tickers, 'var_upper']),
-        })
-        ci_bootstrap_renamed = CI_bootstrap.loc[tickers].rename(columns={
-            'mu_lower': 'μ Lower', 'mu_upper': 'μ Upper',
-            'sigma_lower': 'σ Lower', 'sigma_upper': 'σ Upper',
-        })
+    st.subheader(f"Daily Log Return Box Plot — {company_names[selected_ticker]}")
+    box_plot = (
+        alt.Chart(box_data)
+        .mark_boxplot(color=BAR_COLOR, size=50, outliers={"color": BAR_COLOR})
+        .encode(
+            x=alt.X("log_return:Q", title=None, axis=alt.Axis(
+                format="%", gridColor="#e1e0d9", domainColor="#c3c2b7",
+                tickColor="#c3c2b7", labelColor="#52514e", titleColor="#0b0b0b"))
+        )
+        .properties(height=200)
+        .configure_view(strokeWidth=0)
+    )
+    st.altair_chart(box_plot, use_container_width=True)
 
-        # combine both methods into one DataFrame with grouped column headers
-        ci_comparison = pd.concat({'Parametric': ci_parametric_sigma, 'Bootstrap': ci_bootstrap_renamed}, axis=1)
-        st.dataframe(ci_comparison.style.format("{:.4%}"))
+    # create daily log return summary statistics table
+    st.subheader("Daily Log Return Summary Statistics")
+    summary_stats = pd.DataFrame({
+        "Mean": filtered_log_returns.mean(),
+        "Standard Deviation": filtered_log_returns.std(),
+        "Skewness": filtered_log_returns.skew(),
+        "Excess Kurtosis": filtered_log_returns.kurtosis(),
+        "Minimum": filtered_log_returns.min(),
+        "Maximum": filtered_log_returns.max()
+    })
+    st.dataframe(
+        summary_stats.style.format({
+            "Mean": "{:.2%}",
+            "Standard Deviation": "{:.2%}",
+            "Skewness": "{:.2f}",
+            "Excess Kurtosis": "{:.2f}",
+            "Minimum": "{:.2%}",
+            "Maximum": "{:.2%}"
+        }),
+        column_config={
+            "_index": st.column_config.Column(width=200),
+            **{col: st.column_config.Column(width=100) for col in summary_stats.columns}
+        }
+    )
+    st.caption("Note: excess kurtosis of zero implies that the underlying data follows a normal distribution. Positive excess kurtosis (i.e., leptokurtic) suggests that the data's distribution has more outliers. Negative excess kurtosis (i.e., platykurtic) suggests that the data's distribution produces fewer outliers." )
+
+    # collapse a pair of bounds into a single "lower to upper" range string
+    def pct_range(lower: pd.Series, upper: pd.Series) -> pd.Series:
+        return lower.map(lambda x: f"{x:.2%}") + " to " + upper.map(lambda x: f"{x:.2%}")
+
+    # convert the parametric variance bounds to standard deviation so both
+    # methods' intervals are directly comparable in the same units
+    parametric_sigma_lower = np.sqrt(CI_parametric.loc[tickers, 'var_lower'])
+    parametric_sigma_upper = np.sqrt(CI_parametric.loc[tickers, 'var_upper'])
+
+    # create parametric vs. bootstrap confidence interval comparison table for mu
+    st.subheader("Confidence Intervals: Mean")
+    mu_comparison = pd.DataFrame({
+        'Parametric': pct_range(CI_parametric.loc[tickers, 'mu_lower'], CI_parametric.loc[tickers, 'mu_upper']),
+        'Bootstrap': pct_range(CI_bootstrap.loc[tickers, 'mu_lower'], CI_bootstrap.loc[tickers, 'mu_upper']),
+        'Block Bootstrap': pct_range(CI_block_bootstrap.loc[tickers, 'mu_lower'], CI_block_bootstrap.loc[tickers, 'mu_upper']),
+    })
+    st.dataframe(mu_comparison)
+
+    # create parametric vs. bootstrap confidence interval comparison table for sigma
+    st.subheader("Confidence Intervals: Standard Deviation")
+    sigma_comparison = pd.DataFrame({
+        'Parametric': pct_range(parametric_sigma_lower, parametric_sigma_upper), # type: ignore
+        'Bootstrap': pct_range(CI_bootstrap.loc[tickers, 'sigma_lower'], CI_bootstrap.loc[tickers, 'sigma_upper']),
+        'Block Bootstrap': pct_range(CI_block_bootstrap.loc[tickers, 'sigma_lower'], CI_block_bootstrap.loc[tickers, 'sigma_upper']),
+    })
+    st.dataframe(sigma_comparison)
 
 #################################################################################################################################
 def main():
@@ -375,8 +526,11 @@ def main():
     # compute bootstrap CI for the mean and standard deviation of each ticker
     CI_bootstrap = bootstrap_CI(closing_price_data, n_boot, alpha, random_state)
 
+    # compute block bootstrap CI for the mean and standard deviation of each ticker
+    CI_block_bootstrap = block_bootstrap_CI(closing_price_data, n_boot, alpha, random_state)
+
     # feed data into data visualization function
-    visualize_data(output_path, mle_params, CI_parametric, CI_bootstrap)
+    visualize_data(output_path, mle_params, CI_parametric, CI_bootstrap, CI_block_bootstrap)
 
 #################################################################################################################################
 if __name__ == "__main__":
