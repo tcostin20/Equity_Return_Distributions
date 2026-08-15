@@ -1,6 +1,6 @@
 ## Overview
 
-The goal of this project is to explore the extent to which equity returns follow a normal distribution. Using daily adjusted close prices across 15 publicly-traded stocks, we begin by assuming that that log returns are normally distributed and calculate parameters $\mu$ and $\sigma$ using maximum likelihood estimation. These parameters are used to generate confidence intervals by ticker for $\mu$ and $\sigma$, which are then compared to confidence intervals generated using a bootstrap approach.
+This project explores the extent to which equity returns follow a normal distribution. Using daily adjusted close prices across 15 publicly-traded stocks, we begin by assuming that that log returns are normally distributed and calculate parameters $\mu$ and $\sigma$ using maximum likelihood estimation. These parameters are used to generate confidence intervals by ticker for $\mu$ and $\sigma$, which are compared to confidence intervals generated using both traditional and block bootstrap methods.
 
 ## Requirements
 
