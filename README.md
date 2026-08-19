@@ -1,6 +1,14 @@
-## Overview
+## Introduction
 
-This project explores the extent to which equity returns follow a normal distribution. Using daily adjusted close prices across 15 publicly-traded stocks, we begin by assuming that that log returns are normally distributed and calculate parameters $\mu$ and $\sigma$ using maximum likelihood estimation. These parameters are used to generate confidence intervals by ticker for $\mu$ and $\sigma$, which are compared to confidence intervals generated using both traditional and block bootstrap methods.
+The fact that equity returns do not follow a normal distribution has been widely researched since being first introduced by Mandelbrot (1963)<sup>[(1)](#ref-1)</sup> and Fama (1965)<sup>[(2)](#ref-2)</sup>. As such, the goal of this project is not to add to the already substantial body of academic work but instead to create a simple demonstration of the non-normality of equity returns for a basket of fifteen common stocks and ETFs. Additionally, we also compare the normal distribution to plausible alternatives and examine whether our findings change over different time horizons (e.g., 5-, 10-, and 15-year datasets). A summary of our findings is provided in dashboard format via the [`streamlit`](https://pypi.org/project/streamlit/) and [`altair`](https://altair-viz.github.io) python libraries.
+
+## Data Source and Structure
+
+Our dataset consists of daily close price, adjusted for dividends and stock splits, for each of the tickers in our basket of common stocks and ETFs. The data was sourced from from [Yahoo Finance](https://finance.yahoo.com/) via the `yfinance` library. Given that we are comparing the actual distribution of equity returns to the normal distribution we run our analysis using log returns intstead of simple returns. This ensures that our data has bounds $(-\infty,\infty)$ which is consistent with the bounds of a normal distribution (simple returns are bounded below because it is impossible to lose more than the value of the ticker).
+
+## Methods Used
+
+TBU
 
 ## Requirements
 
@@ -12,9 +20,11 @@ This project explores the extent to which equity returns follow a normal distrib
 - [`scipy`](https://scipy.org)
 - [`streamlit`](https://pypi.org/project/streamlit/)
 
-## Data Source
+## References
 
-All price data is sourced from [Yahoo Finance](https://finance.yahoo.com/) via the `yfinance` library. Prices are adjusted for splits and dividends.
+<a id="ref-1">[1]</a> Mandelbrot, B. (1963). The Variation of Certain Speculative Prices. *The Journal of Business*, 36(4), 394–419. [https://doi.org/10.1086/294632](https://doi.org/10.1086/294632)
+
+<a id="ref-2">[2]</a> Fama, E. F. (1965). The Behavior of Stock-Market Prices. *The Journal of Business*, 38(1), 34–105. [https://doi.org/10.1086/294743](https://doi.org/10.1086/294743)
 
 ## Author
 
