@@ -245,7 +245,49 @@ def block_bootstrap_CI(data:pd.DataFrame, n_boot: int, alpha: float, random_stat
     return pd.DataFrame.from_dict(results, orient='index')
 
 #################################################################################################################################
-def visualize_data(output_path: str, MLE_params:pd.DataFrame, CI_parametric: pd.DataFrame, CI_bootstrap: pd.DataFrame, CI_block_bootstrap: pd.DataFrame) -> None:
+def goodness_of_fit(data: pd.DataFrame, MLE_fit: pd.DataFrame) -> pd.DataFrame:
+    '''
+    Function that conducts several goodness of fit tests on the
+    log return series for each ticker
+
+    Parameters
+    ----------
+    data (pd.DataFrame): DataFrame of closing prices, with tickers 
+                         as columns and dates as the index.
+
+    Returns
+    -------
+    pd.DataFrame: DataFrame indexed by ticker with columns containing
+                  relevant goodness of fit statistics
+    '''
+    # compute log returns for each ticker
+    log_returns = np.log(data / data.shift(1)).dropna() # type: ignore
+
+    results = {}
+
+    for ticker in log_returns.columns:
+        sample = log_returns[ticker].to_numpy() # generate sample data for each ticker
+
+        # run goodness of fit tests
+        jarque_bera = stats.jarque_bera(sample)
+        ks = stats.kstest(sample, stats.norm(loc=MLE_fit.loc[ticker, 'mu'], scale=MLE_fit.loc[ticker, 'sigma']).cdf)
+        # method='interpolated' opts into the pvalue-based result, avoiding the
+        # deprecated critical_values/significance_level table lookup (removed in scipy 1.19)
+        anderson = stats.anderson(sample, dist = 'norm', method = 'interpolate')
+
+        results[ticker] = {
+            'jarque_stat': jarque_bera[0],
+            'jarque_pvalue': jarque_bera[1],
+            'ks_stat': ks[0],
+            'ks_pvalue': ks[1],
+            'anderson_stat': anderson.statistic, # type: ignore
+            'anderson_pvalue': anderson.pvalue # type: ignore
+        }
+
+    return pd.DataFrame.from_dict(results, orient='index')
+
+#################################################################################################################################
+def visualize_data(output_path: str, MLE_params:pd.DataFrame, CI_parametric: pd.DataFrame, CI_bootstrap: pd.DataFrame, CI_block_bootstrap: pd.DataFrame, GoF: pd.DataFrame) -> None:
     '''
     Function that visualizes the equity return data for each ticker.
 
@@ -256,6 +298,7 @@ def visualize_data(output_path: str, MLE_params:pd.DataFrame, CI_parametric: pd.
     CI_parametric (pd.DataFrame): Parametric confidence intervals for each ticker.
     CI_bootstrap (pd.DataFrame):  Bootstrap confidence intervals for each ticker.
     CI_block_bootstrap (pd.DataFrame): Block bootstrap confidence intervals for each ticker.
+    GoF (pd.DataFrame):           Goodness-of-fit test results for each ticker.
 
     Returns
     ----------
@@ -321,7 +364,6 @@ def visualize_data(output_path: str, MLE_params:pd.DataFrame, CI_parametric: pd.
     raw_data = load_data(output_path)
 
     st.title("Equity Return Distributions")
-    st.caption("All data is sourced from Yahoo Finance via the yfinance library")
 
     # always analyze the full ticker universe
     tickers = list(raw_data.columns)
@@ -472,9 +514,39 @@ def visualize_data(output_path: str, MLE_params:pd.DataFrame, CI_parametric: pd.
     )
     st.caption("Note: excess kurtosis of zero implies that the underlying data follows a normal distribution. Positive excess kurtosis (i.e., leptokurtic) suggests that the data's distribution has more outliers. Negative excess kurtosis (i.e., platykurtic) suggests that the data's distribution produces fewer outliers." )
 
+    # create goodness-of-fit summary table
+    st.subheader("Goodness-of-Fit Tests")
+    gof_tests = {
+        'Jarque-Bera': ('jarque_stat', 'jarque_pvalue'),
+        'Kolmogorov-Smirnov': ('ks_stat', 'ks_pvalue'),
+        'Anderson-Darling': ('anderson_stat', 'anderson_pvalue'),
+    }
+    gof_columns = {}
+    for test, (stat_col, pvalue_col) in gof_tests.items():
+        gof_columns[(test, 'Statistic')] = GoF.loc[tickers, stat_col].map(lambda x: f"{x:,.2f}")
+        gof_columns[(test, 'p-Value')] = GoF.loc[tickers, pvalue_col].map(lambda x: f"{x:.2f}")
+        if test == 'Kolmogorov-Smirnov':
+            # Bonferroni-correct across the ticker family (len(tickers) comparisons,
+            # one KS test per ticker) so one ticker's apparent significance isn't
+            # inflated by running the same test repeatedly
+            ks_bonferroni = (GoF.loc[tickers, pvalue_col] * len(tickers)).clip(upper=1.0)
+            gof_columns[(test, 'Bonferroni p-Value')] = ks_bonferroni.map(lambda x: f"{x:.2f}")
+    gof_summary = pd.DataFrame(gof_columns)
+    st.dataframe(gof_summary)
+    st.caption(f"Note: we include the Bonferroni p-value for the Kolmogorov-Smirnov test because it changes the outcome of our hypothesis test for certain tickers.")
+
     # collapse a pair of bounds into a single "lower to upper" range string
     def pct_range(lower: pd.Series, upper: pd.Series) -> pd.Series:
         return lower.map(lambda x: f"{x:.2%}") + " to " + upper.map(lambda x: f"{x:.2%}")
+
+    # build a table with one "Interval" and "Width" sub-column per CI method,
+    # nested under that method's name via a MultiIndex column header
+    def build_ci_table(bounds: dict[str, tuple[pd.Series, pd.Series]]) -> pd.DataFrame:
+        columns = {}
+        for method, (lower, upper) in bounds.items():
+            columns[(method, 'Interval')] = pct_range(lower, upper)
+            columns[(method, 'Width')] = (upper - lower).map(lambda x: f"{x:.2%}")
+        return pd.DataFrame(columns)
 
     # convert the parametric variance bounds to standard deviation so both
     # methods' intervals are directly comparable in the same units
@@ -483,26 +555,26 @@ def visualize_data(output_path: str, MLE_params:pd.DataFrame, CI_parametric: pd.
 
     # create parametric vs. bootstrap confidence interval comparison table for mu
     st.subheader("Confidence Intervals: Mean")
-    mu_comparison = pd.DataFrame({
-        'Parametric': pct_range(CI_parametric.loc[tickers, 'mu_lower'], CI_parametric.loc[tickers, 'mu_upper']),
-        'Bootstrap': pct_range(CI_bootstrap.loc[tickers, 'mu_lower'], CI_bootstrap.loc[tickers, 'mu_upper']),
-        'Block Bootstrap': pct_range(CI_block_bootstrap.loc[tickers, 'mu_lower'], CI_block_bootstrap.loc[tickers, 'mu_upper']),
+    mu_comparison = build_ci_table({
+        'Parametric': (CI_parametric.loc[tickers, 'mu_lower'], CI_parametric.loc[tickers, 'mu_upper']),
+        'Bootstrap': (CI_bootstrap.loc[tickers, 'mu_lower'], CI_bootstrap.loc[tickers, 'mu_upper']),
+        'Block Bootstrap': (CI_block_bootstrap.loc[tickers, 'mu_lower'], CI_block_bootstrap.loc[tickers, 'mu_upper']),
     })
     st.dataframe(mu_comparison)
 
     # create parametric vs. bootstrap confidence interval comparison table for sigma
     st.subheader("Confidence Intervals: Standard Deviation")
-    sigma_comparison = pd.DataFrame({
-        'Parametric': pct_range(parametric_sigma_lower, parametric_sigma_upper), # type: ignore
-        'Bootstrap': pct_range(CI_bootstrap.loc[tickers, 'sigma_lower'], CI_bootstrap.loc[tickers, 'sigma_upper']),
-        'Block Bootstrap': pct_range(CI_block_bootstrap.loc[tickers, 'sigma_lower'], CI_block_bootstrap.loc[tickers, 'sigma_upper']),
+    sigma_comparison = build_ci_table({
+        'Parametric': (parametric_sigma_lower, parametric_sigma_upper), # type: ignore
+        'Bootstrap': (CI_bootstrap.loc[tickers, 'sigma_lower'], CI_bootstrap.loc[tickers, 'sigma_upper']),
+        'Block Bootstrap': (CI_block_bootstrap.loc[tickers, 'sigma_lower'], CI_block_bootstrap.loc[tickers, 'sigma_upper']),
     })
     st.dataframe(sigma_comparison)
 
 #################################################################################################################################
 def main():
     # define variables to be used
-    tickers = ['AAPL', 'MSFT', 'GOOGL']
+    tickers = ['AAPL', 'MSFT', 'GOOGL', 'META', 'NVDA', 'AMZN', 'TSM', 'AVGO', 'IBM', 'ANET', 'APO', 'OWL', 'KKR', 'BX', 'ARES']
     period_start = "2021-08-03"
     period_end = "2026-08-03"
     interval = "1d"
@@ -529,8 +601,11 @@ def main():
     # compute block bootstrap CI for the mean and standard deviation of each ticker
     CI_block_bootstrap = block_bootstrap_CI(closing_price_data, n_boot, alpha, random_state)
 
+    # run goodness of fit tests on each ticker's log return series
+    GoF = goodness_of_fit(closing_price_data, mle_params)
+
     # feed data into data visualization function
-    visualize_data(output_path, mle_params, CI_parametric, CI_bootstrap, CI_block_bootstrap)
+    visualize_data(output_path, mle_params, CI_parametric, CI_bootstrap, CI_block_bootstrap, GoF)
 
 #################################################################################################################################
 if __name__ == "__main__":
