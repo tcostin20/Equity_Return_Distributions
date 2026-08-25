@@ -22,7 +22,7 @@ import math
 #################################################################################################################################
 def get_data(tickers:list,period_start:str,period_end:str,interval:str, output_path:str) -> None:
     '''
-    Function that creates a csv file containing equity return data for each ticker the user provides.
+    Function that creates a csv file containing log return data for each ticker.
     
     Parameters
     ----------
@@ -35,27 +35,29 @@ def get_data(tickers:list,period_start:str,period_end:str,interval:str, output_p
     ----------
     None
     '''
-    # check to see whether a csv file already exists at the output path
+    # do nothing if identical file already exists (i.e., avoid calling function needlessly)
     if Path(output_path).exists():
             existing_columns = pd.read_csv(output_path, index_col=0, nrows=0).columns
             if set(existing_columns) == set(tickers):
-                return  # if the file exists and is identical do nothing
+                return
 
-    # download the closing price data for the specified tickers and time period
+    # download the closing price data
     closing_price_data = yf.download(tickers, start=period_start, end=period_end, interval=interval, auto_adjust=True)['Close'] # type: ignore
 
-    # save data set to the output path
-    closing_price_data.to_csv(output_path, index=True, float_format='%.2f')
+    # calculate log returns, dropping the first row of data to avoid calculation errors
+    log_returns = np.log(closing_price_data / closing_price_data.shift(1)).dropna() # type: ignore
+
+    # export log returns dataset in csv format to output path
+    log_returns.to_csv(output_path, index=True, float_format='%.8f')
 
 #################################################################################################################################
 def MLE_fit(data: pd.DataFrame) -> pd.DataFrame:
     '''
-    Function that computes the Normal distribution parameters mu and sigma
-    for each ticker's log return series using maximum likelihood estimation.
+    Function that computes parameters mu and sigma for each ticker's log return series using maximum likelihood estimation.
 
     Parameters
     ----------
-    data (pd.DataFrame): DataFrame of closing prices, with tickers as columns and
+    data (pd.DataFrame): DataFrame of log returns, with tickers as columns and
                          dates as the index.
 
     Returns
@@ -64,38 +66,23 @@ def MLE_fit(data: pd.DataFrame) -> pd.DataFrame:
                   holding the Normal parameters and sample size for each ticker's 
                   log returns.
     '''
-    # compute log returns for each ticker
-    log_returns = np.log(data / data.shift(1)).dropna() # type: ignore
-
-    # Note: we take the log return instead of simple return to ensure our distribution has
-    # bounds from negative infinity to positive infinity, which mirrors the normal
-    # distribution. A simple return would have a lower bound at negative 1. We use the
-    # "dropna()" function because the shift causes the first row of data to be NaN.
-
-    # MLE for mu is the sample mean of returns (definitional)
-    mu = log_returns.mean()
-
-    # MLE for sigma is the biased (ddof=0) sample standard deviation of returns (definitional)
-    sigma = log_returns.std(ddof=0)
-
-    # number of return observations used to fit each ticker
-    n = log_returns.count()
+    mu = data.mean()
+    sigma = data.std(ddof=0)
+    n = data.count()
 
     # combine into a single DataFrame indexed by ticker
-    MLE_fit_data = pd.DataFrame({'mu': mu, 'sigma': sigma, 'n': n})
-    return MLE_fit_data
+    return pd.DataFrame({'mu': mu, 'sigma': sigma, 'n': n})
 
 #################################################################################################################################
 def parametric_CI(MLE_fit: pd.DataFrame, alpha: float) -> pd.DataFrame:
     '''
-    Function that generates parametric confidence intervals for the mean and variance
-    of each ticker's log return series, based on the Normal MLE fit.
+    Function that generates parametric confidence intervals for the mean and variance of each ticker's log return series, 
+    based on the Normal MLE fit.
 
     Parameters
     ----------
-    MLE_fit (pd.DataFrame): DataFrame indexed by ticker with columns 'mu', 'sigma',
-                            and 'n', as produced by MLE_fit_normal.
-    confidence (float):     The confidence level for the interval.
+    MLE_fit (pd.DataFrame): DataFrame indexed by ticker with MLE parameters.
+    confidence (float):     Confidence level for the interval.
 
     Returns
     -------
@@ -103,64 +90,62 @@ def parametric_CI(MLE_fit: pd.DataFrame, alpha: float) -> pd.DataFrame:
                   'var_lower', and 'var_upper' holding the confidence interval bounds
                   for the mean and variance of each ticker's log returns.
     '''
-    # unpack fitted parameters and sample size
     mu = MLE_fit['mu']
     n = MLE_fit['n']
 
-    # calculate variance based on normal distribution (this uses n-1 DOF vs. n for the MLE calculation)
+    # calculate variance based on normal distribution
     sample_var = MLE_fit['sigma']**2 * n / (n - 1)
     sample_std = np.sqrt(sample_var)
 
-    # calculate confidence interval for mu and store upper/lower bounds in variables
+    # calculate confidence interval for mu
     mu_lower, mu_upper = stats.t.interval(1 - alpha, df=n - 1, loc=mu, scale=sample_std / np.sqrt(n))
 
     # calculate critical values for variance using chi-squared distribution
     chi2_lower = stats.chi2.ppf(alpha / 2, df=n - 1)
     chi2_upper = stats.chi2.ppf(1 - alpha / 2, df=n - 1)
 
-    # 
+    # calculate bounds for variance confidence interval
     var_lower = (n - 1) * sample_var / chi2_upper
     var_upper = (n - 1) * sample_var / chi2_lower
 
     # combine into a single DataFrame indexed by ticker
-    return pd.DataFrame({
-        'mu_lower': mu_lower,
-        'mu_upper': mu_upper,
-        'var_lower': var_lower,
-        'var_upper': var_upper
-    })
+    return pd.DataFrame({'mu_lower': mu_lower,
+                         'mu_upper': mu_upper,
+                         'var_lower': var_lower,
+                         'var_upper': var_upper})
 
 #################################################################################################################################
 def bootstrap_CI(data: pd.DataFrame, n_boot: int, alpha: float, random_state: int) -> pd.DataFrame:
     '''
-    Function that generates non-parametric bootstrap confidence intervals 
-    for the mean and standard deviation of each ticker's log return series.
+    Function that generates non-parametric bootstrap confidence intervals for the mean and standard deviation of each 
+    ticker's log return series.
 
     Parameters
     ----------
-    data (pd.DataFrame): DataFrame of closing prices, with tickers as columns and
-                         dates as the index.
+    data (pd.DataFrame): DataFrame of log returns indexed by date.
     n_boot (int):        Number of bootstrap resamples to draw.
-    alpha (float):       Significance level for the interval.
-    random_state (int):  Seed for the random number generator, for reproducibility.
+    alpha (float):       Significance level for the confidence interval.
+    random_state (int):  Seed for the random number generator.
 
     Returns
     -------
-    pd.DataFrame: DataFrame indexed by ticker with columns 'mu_lower', 'mu_upper',
-                  'sigma_lower', and 'sigma_upper' holding the bootstrap confidence
-                  interval bounds for the mean and standard deviation of each
-                  ticker's log returns.
+    pd.DataFrame: DataFrame indexed by ticker holding the bootstrap confidence interval bounds
+                  for the mean and standard deviation of each ticker's log returns.
     '''
-    # compute log returns for each ticker (keep statistic consistent across parametric and bootstrap)
-    log_returns = np.log(data / data.shift(1)).dropna() # type: ignore
-
     # create random number generator to be used for resampling
     random_numbers = np.random.default_rng(random_state)
 
+    # define dictionary for results
     results = {}
-    for ticker in log_returns.columns:
-        sample = log_returns[ticker].to_numpy() # isolate ticker data and convert to numpy array to improve speed
+
+    # implement bootstrap for each ticker
+    for ticker in data.columns:
+        sample = data[ticker].to_numpy() # convert to numpy array to improve speed
         n = len(sample) # define resample size
+
+        # point estimates from the observed sample, needed to center the pivotal interval
+        sample_mean = sample.mean()
+        sample_std = sample.std(ddof=1)
 
         # draw n_boot resamples of size n
         sample_indices = random_numbers.integers(0, n, size=(n_boot, n))
@@ -170,12 +155,27 @@ def bootstrap_CI(data: pd.DataFrame, n_boot: int, alpha: float, random_state: in
         boot_means = boot_samples.mean(axis=1)
         boot_stds = boot_samples.std(axis=1, ddof=1)
 
-        # input results into dictionary using the percentile method (i.e., find the 97.5% and 2.5% percentiles)
+        # calculate bounds for mu and sigma using percentile method
+        mu_lower_pct = np.percentile(boot_means, 100 * alpha / 2)
+        mu_upper_pct = np.percentile(boot_means, 100 * (1 - alpha / 2))
+        sigma_lower_pct = np.percentile(boot_stds, 100 * alpha / 2)
+        sigma_upper_pct = np.percentile(boot_stds, 100 * (1 - alpha / 2))
+
+        # calculate bounds for mu and sigma using pivotal method
+        mu_lower_piv = 2 * sample_mean - mu_upper_pct
+        mu_upper_piv = 2 * sample_mean - mu_lower_pct
+        sigma_lower_piv = 2 * sample_std - sigma_upper_pct
+        sigma_upper_piv = 2 * sample_std - sigma_lower_pct
+        
         results[ticker] = {
-            'mu_lower': np.percentile(boot_means, 100 * alpha / 2),
-            'mu_upper': np.percentile(boot_means, 100 * (1 - alpha / 2)),
-            'sigma_lower': np.percentile(boot_stds, 100 * alpha / 2),
-            'sigma_upper': np.percentile(boot_stds, 100 * (1 - alpha / 2)),
+            'mu_lower_pct': mu_lower_pct,
+            'mu_upper_pct': mu_upper_pct,
+            'sigma_lower_pct': sigma_lower_pct,
+            'sigma_upper_pct': sigma_upper_pct,
+            'mu_lower_piv': mu_lower_piv,
+            'mu_upper_piv': mu_upper_piv,
+            'sigma_lower_piv': sigma_lower_piv,
+            'sigma_upper_piv': sigma_upper_piv,
         }
 
     return pd.DataFrame.from_dict(results, orient='index')
@@ -183,36 +183,33 @@ def bootstrap_CI(data: pd.DataFrame, n_boot: int, alpha: float, random_state: in
 #################################################################################################################################
 def block_bootstrap_CI(data:pd.DataFrame, n_boot: int, alpha: float, random_state: int) -> pd.DataFrame:
     '''
-    Function that generates non-parametric block bootstrap confidence intervals 
-    for the mean and standard deviation of each ticker's log return series.
+    Function that generates non-parametric block bootstrap confidence intervals for the mean and standard deviation of each 
+    ticker's log return series.
 
     Parameters
     ----------
-    data (pd.DataFrame): DataFrame of closing prices, with tickers as columns and
-                         dates as the index.
+    data (pd.DataFrame): DataFrame of log returns index by date.
     n_boot (int):        Number of bootstrap resamples to draw.
     alpha (float):       Significance level for the interval.
-    random_state (int):  Seed for the random number generator, for reproducibility.
+    random_state (int):  Seed for the random number generator.
 
     Returns
     -------
-    pd.DataFrame: DataFrame indexed by ticker with columns 'mu_lower', 'mu_upper',
-                  'sigma_lower', and 'sigma_upper' holding the block bootstrap confidence
-                  interval bounds for the mean and standard deviation of each
-                  ticker's log returns.
+    pd.DataFrame: DataFrame indexed by ticker holding the block bootstrap confidence interval bounds 
+                  for the mean and standard deviation of each ticker's log returns.
     '''
-    # compute log returns for each ticker (keep statistic consistent across parametric and bootstrap)
-    log_returns = np.log(data / data.shift(1)).dropna() # type: ignore
-
     # create random number generator to be used for resampling
     random_numbers = np.random.default_rng(random_state)
 
     # calculate optimal block length
-    circular_block_length = ar.optimal_block_length(log_returns)['circular'].round().clip(lower=1)
+    circular_block_length = ar.optimal_block_length(data)['circular'].round().clip(lower=1)
 
+    # define dictionary for results
     results = {}
-    for ticker in log_returns.columns:
-        sample = log_returns[ticker].to_numpy() # isolate ticker data and convert to numpy array to improve speed
+
+    # implement bootstrap for each ticker
+    for ticker in data.columns:
+        sample = data[ticker].to_numpy()
         n = len(sample)
         ticker_block_length = int(circular_block_length[ticker]) # retrieve boot length from circular block length array
         num_blocks = math.ceil(n/ticker_block_length) # calculate number of blocks needed ensuring you have enough indicies
@@ -245,35 +242,33 @@ def block_bootstrap_CI(data:pd.DataFrame, n_boot: int, alpha: float, random_stat
     return pd.DataFrame.from_dict(results, orient='index')
 
 #################################################################################################################################
-def goodness_of_fit(data: pd.DataFrame, MLE_fit: pd.DataFrame) -> pd.DataFrame:
+def goodness_of_fit(data: pd.DataFrame, MLE_fit: pd.DataFrame, random_state: int) -> pd.DataFrame:
     '''
     Function that conducts several goodness of fit tests on the
     log return series for each ticker
 
     Parameters
     ----------
-    data (pd.DataFrame): DataFrame of closing prices, with tickers 
+    data (pd.DataFrame): DataFrame of log returns, with tickers
                          as columns and dates as the index.
+    random_state (int):  Seed for the Anderson-Darling Monte Carlo p-value, for reproducibility.
 
     Returns
     -------
     pd.DataFrame: DataFrame indexed by ticker with columns containing
                   relevant goodness of fit statistics
     '''
-    # compute log returns for each ticker
-    log_returns = np.log(data / data.shift(1)).dropna() # type: ignore
-
     results = {}
 
-    for ticker in log_returns.columns:
-        sample = log_returns[ticker].to_numpy() # generate sample data for each ticker
+    for ticker in data.columns:
+        sample = data[ticker].to_numpy() # generate sample data for each ticker
 
         # run goodness of fit tests
         jarque_bera = stats.jarque_bera(sample)
         ks = stats.kstest(sample, stats.norm(loc=MLE_fit.loc[ticker, 'mu'], scale=MLE_fit.loc[ticker, 'sigma']).cdf)
-        # method='interpolated' opts into the pvalue-based result, avoiding the
-        # deprecated critical_values/significance_level table lookup (removed in scipy 1.19)
-        anderson = stats.anderson(sample, dist = 'norm', method = 'interpolate')
+
+        # Use Monte Carlo p-value that simulates the null distribution directly instead of interpolating (which is bounded)
+        anderson = stats.anderson(sample, dist='norm', method=stats.MonteCarloMethod(n_resamples=2000, rng=random_state))
 
         results[ticker] = {
             'jarque_stat': jarque_bera[0],
@@ -287,7 +282,81 @@ def goodness_of_fit(data: pd.DataFrame, MLE_fit: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame.from_dict(results, orient='index')
 
 #################################################################################################################################
-def visualize_data(output_path: str, MLE_params:pd.DataFrame, CI_parametric: pd.DataFrame, CI_bootstrap: pd.DataFrame, CI_block_bootstrap: pd.DataFrame, GoF: pd.DataFrame) -> None:
+def permutation_test(data: pd.DataFrame, split_date: str, n_perm: int, random_state: int) -> pd.DataFrame:
+    '''
+    Function that tests, for each ticker, whether the mean log return differs
+    between the sub-period before split_date and the sub-period on/after it.
+    Reports both a permutation test and a classical two-sample t-test on the
+    same split, so the two conclusions can be compared.
+
+    Parameters
+    ----------
+    data (pd.DataFrame):  DataFrame of log returns, with tickers as columns and
+                          dates as the index.
+    split_date (str):     Date dividing each ticker's log return series into a
+                          "pre" sub-period (before split_date) and a "post"
+                          sub-period (on or after split_date).
+    n_perm (int):         Number of label-shuffling permutations to draw.
+    random_state (int):   Seed for the random number generator, for reproducibility.
+
+    Returns
+    -------
+    pd.DataFrame: DataFrame indexed by ticker with columns 'n_pre', 'n_post',
+                  'mean_pre', 'mean_post', 'observed_diff', 'perm_pvalue',
+                  'ttest_stat', and 'ttest_pvalue' holding the permutation test
+                  and t-test results comparing each ticker's pre- and
+                  post-split_date mean log return.
+    '''
+    split_date = pd.Timestamp(split_date) #type: ignore
+
+    # create random number generator to be used for shuffling
+    random_numbers = np.random.default_rng(random_state)
+
+    results = {}
+    for ticker in data.columns:
+        series = data[ticker]
+        pre = series[series.index < split_date].to_numpy()
+        post = series[series.index >= split_date].to_numpy()
+        n_pre, n_post = len(pre), len(post)
+
+        observed_diff = post.mean() - pre.mean()
+
+        # pool pre and post together, then draw n_perm random permutations of the
+        # pooled values at once (argsort-of-random-floats is a vectorized way to
+        # generate many independent shuffles without a per-permutation loop)
+        pooled = np.concatenate([pre, post])
+        n = n_pre + n_post
+        shuffled = pooled[random_numbers.random((n_perm, n)).argsort(axis=1)]
+
+        # under the null (no real difference between periods), the labels are
+        # meaningless, so any split of the pooled values into groups of size
+        # n_post/n_pre is as valid as the real one - this builds that null
+        # distribution of mean differences from n_perm such random splits
+        perm_diffs = shuffled[:, :n_post].mean(axis=1) - shuffled[:, n_post:].mean(axis=1)
+
+        # two-sided p-value: how often does a random split produce a mean
+        # difference at least as extreme as the one actually observed?
+        # add-one smoothing avoids ever reporting p = 0
+        perm_pvalue = (1 + np.sum(np.abs(perm_diffs) >= np.abs(observed_diff))) / (n_perm + 1)
+
+        # classical two-sample t-test on the same split, for comparison
+        ttest_stat, ttest_pvalue = stats.ttest_ind(post, pre)
+
+        results[ticker] = {
+            'n_pre': n_pre,
+            'n_post': n_post,
+            'mean_pre': pre.mean(),
+            'mean_post': post.mean(),
+            'observed_diff': observed_diff,
+            'perm_pvalue': perm_pvalue,
+            'ttest_stat': ttest_stat,
+            'ttest_pvalue': ttest_pvalue,
+        }
+
+    return pd.DataFrame.from_dict(results, orient='index')
+
+#################################################################################################################################
+def visualize_data(output_path: str, MLE_params:pd.DataFrame, CI_parametric: pd.DataFrame, CI_bootstrap: pd.DataFrame, CI_block_bootstrap: pd.DataFrame, GoF: pd.DataFrame, split_date: str, permutation_tech: pd.DataFrame, permutation_alt: pd.DataFrame) -> None:
     '''
     Function that visualizes the equity return data for each ticker.
 
@@ -349,34 +418,29 @@ def visualize_data(output_path: str, MLE_params:pd.DataFrame, CI_parametric: pd.
         </style>
     """, unsafe_allow_html=True)
 
-    # cache the data to avoid reloading it every time the app is run
+    # cache data to avoid reloading it every time the app is refreshed
     @st.cache_data
     def load_data(output_path: str) -> pd.DataFrame:
         return pd.read_csv(output_path, index_col=0, parse_dates=True)
 
-    # define function to pull full company name from Yahoo Finance given a ticker symbol
-    # (cached so the app doesn't re-hit the network on every widget interaction)
+    # cache data to avoid reloading it every time the app is refreshed
     @st.cache_data
     def get_company_name(ticker: str) -> str:
         return yf.Ticker(ticker).info['longName']  # type: ignore
 
-    # pull raw daily data from CSV file
-    raw_data = load_data(output_path)
+    # pull daily log return data from CSV file
+    log_returns = load_data(output_path)
 
     st.title("Equity Return Distributions")
 
-    # always analyze the full ticker universe
-    tickers = list(raw_data.columns)
+    tickers = list(log_returns.columns)
     mle_params = MLE_params.loc[tickers]
-
-    # daily log returns, matching the series the confidence intervals are computed on
-    log_returns = np.log(raw_data / raw_data.shift(1)).dropna() # type: ignore
     filtered_log_returns = log_returns[tickers]
 
     # map tickers to company names for display
-    company_names = {t: get_company_name(t) for t in raw_data.columns}
+    company_names = {t: get_company_name(t) for t in log_returns.columns}
 
-    # dropdown to pick a single ticker for the return distribution histogram
+    # ticker dropdown menu for the return distribution histogram
     selected_ticker = st.selectbox(
         "Select a ticker",
         options=tickers,
@@ -384,8 +448,7 @@ def visualize_data(output_path: str, MLE_params:pd.DataFrame, CI_parametric: pd.
         width=250
     )
 
-    # build a density histogram (bar heights integrate to 1, not raw counts) so the
-    # shape is directly comparable to a fitted normal PDF regardless of sample size
+    # build a density histogram
     selected_returns = log_returns[selected_ticker]
     hist_counts, bin_edges = np.histogram(selected_returns, bins="auto", density=True)
     hist_data = pd.DataFrame({
@@ -524,16 +587,63 @@ def visualize_data(output_path: str, MLE_params:pd.DataFrame, CI_parametric: pd.
     gof_columns = {}
     for test, (stat_col, pvalue_col) in gof_tests.items():
         gof_columns[(test, 'Statistic')] = GoF.loc[tickers, stat_col].map(lambda x: f"{x:,.2f}")
-        gof_columns[(test, 'p-Value')] = GoF.loc[tickers, pvalue_col].map(lambda x: f"{x:.2f}")
-        if test == 'Kolmogorov-Smirnov':
-            # Bonferroni-correct across the ticker family (len(tickers) comparisons,
-            # one KS test per ticker) so one ticker's apparent significance isn't
-            # inflated by running the same test repeatedly
-            ks_bonferroni = (GoF.loc[tickers, pvalue_col] * len(tickers)).clip(upper=1.0)
-            gof_columns[(test, 'Bonferroni p-Value')] = ks_bonferroni.map(lambda x: f"{x:.2f}")
+        gof_columns[(test, 'p-Value')] = GoF.loc[tickers, pvalue_col].map(lambda x: f"{x:.4f}")
+        # Bonferroni-correct across the ticker family (len(tickers) comparisons per
+        # test) so one ticker's apparent significance isn't inflated by running the
+        # same test repeatedly across the basket
+        bonferroni_pvalue = (GoF.loc[tickers, pvalue_col] * len(tickers)).clip(upper=1.0)
+        gof_columns[(test, 'Bonferroni p-Value')] = bonferroni_pvalue.map(lambda x: f"{x:.4f}")
     gof_summary = pd.DataFrame(gof_columns)
     st.dataframe(gof_summary)
-    st.caption(f"Note: we include the Bonferroni p-value for the Kolmogorov-Smirnov test because it changes the outcome of our hypothesis test for certain tickers.")
+    st.caption("Note: standard p-values and Bonferroni p-values for Anderson-Darling appear identical because no practical Monte Carlo resample budget exists (i.e., the number of resamples required to generate accurate values is extreme).")
+
+    # collapse permutation test results into a display-ready table
+    def build_permutation_table(results: pd.DataFrame) -> pd.DataFrame:
+        return pd.DataFrame({
+            'Mean (Pre)': results['mean_pre'].map(lambda x: f"{x:.2%}"),
+            'Mean (Post)': results['mean_post'].map(lambda x: f"{x:.2%}"),
+            'Difference': results['observed_diff'].map(lambda x: f"{x:.2%}"),
+            'Permutation p-Value': results['perm_pvalue'].map(lambda x: f"{x:.4f}"),
+            't-Test p-Value': results['ttest_pvalue'].map(lambda x: f"{x:.4f}"),
+        })
+
+    # forest-style dot plot: one dot per ticker at its observed pre/post mean
+    # difference, colored by whether the permutation test finds it significant,
+    # so the pattern across a whole group is visible at a glance
+    def build_forest_plot(results: pd.DataFrame) -> alt.Chart:
+        plot_data = results.reset_index().rename(columns={'index': 'ticker'})
+        plot_data['significant'] = np.where(plot_data['perm_pvalue'] < 0.05, 'p < 0.05', 'not significant')
+        order = plot_data.sort_values('observed_diff')['ticker'].tolist()
+
+        dots = (
+            alt.Chart(plot_data)
+            .mark_circle(size=180)
+            .encode(
+                x=alt.X('observed_diff:Q', title='Observed Difference in Mean Daily Log Return (Post − Pre)', axis=alt.Axis(
+                    format='%', gridColor="#e1e0d9", domainColor="#c3c2b7",
+                    tickColor="#c3c2b7", labelColor="#52514e", titleColor="#0b0b0b")),
+                y=alt.Y('ticker:N', sort=order, title=None, axis=alt.Axis(
+                    domainColor="#c3c2b7", tickColor="#c3c2b7", labelColor="#52514e")),
+                color=alt.Color('significant:N', scale=alt.Scale(domain=['p < 0.05', 'not significant'], range=[BAR_COLOR, '#c9d3e0']), legend=alt.Legend(title=None)),
+                tooltip=[
+                    alt.Tooltip('ticker:N', title='Ticker'),
+                    alt.Tooltip('observed_diff:Q', title='Difference', format='.2%'),
+                    alt.Tooltip('perm_pvalue:Q', title='Permutation p-Value', format='.4f'),
+                ]
+            )
+            .properties(height=32 * len(plot_data) + 20)
+        )
+        zero_line = alt.Chart(pd.DataFrame({'x': [0]})).mark_rule(color='#0b0b0b', strokeDash=[4, 3]).encode(x='x:Q')
+        return (dots + zero_line).configure_view(strokeWidth=0) # type: ignore
+
+    # create sub-period mean return test sections, one per ticker group
+    st.subheader(f"Sub-Period Mean Return Test: Technology Companies")
+    st.altair_chart(build_forest_plot(permutation_tech), use_container_width=True)
+    st.dataframe(build_permutation_table(permutation_tech))
+    st.subheader(f"Sub-Period Mean Return Test: Alternative Asset Managers")
+    st.altair_chart(build_forest_plot(permutation_alt), use_container_width=True)
+    st.dataframe(build_permutation_table(permutation_alt))
+    st.caption("Note: split date is 11/30/22, which is the day that Chat GPT was released to the public.")
 
     # collapse a pair of bounds into a single "lower to upper" range string
     def pct_range(lower: pd.Series, upper: pd.Series) -> pd.Series:
@@ -557,7 +667,8 @@ def visualize_data(output_path: str, MLE_params:pd.DataFrame, CI_parametric: pd.
     st.subheader("Confidence Intervals: Mean")
     mu_comparison = build_ci_table({
         'Parametric': (CI_parametric.loc[tickers, 'mu_lower'], CI_parametric.loc[tickers, 'mu_upper']),
-        'Bootstrap': (CI_bootstrap.loc[tickers, 'mu_lower'], CI_bootstrap.loc[tickers, 'mu_upper']),
+        'Bootstrap (Percentile)': (CI_bootstrap.loc[tickers, 'mu_lower_pct'], CI_bootstrap.loc[tickers, 'mu_upper_pct']),
+        'Bootstrap (Pivotal)': (CI_bootstrap.loc[tickers, 'mu_lower_piv'], CI_bootstrap.loc[tickers, 'mu_upper_piv']),
         'Block Bootstrap': (CI_block_bootstrap.loc[tickers, 'mu_lower'], CI_block_bootstrap.loc[tickers, 'mu_upper']),
     })
     st.dataframe(mu_comparison)
@@ -566,7 +677,8 @@ def visualize_data(output_path: str, MLE_params:pd.DataFrame, CI_parametric: pd.
     st.subheader("Confidence Intervals: Standard Deviation")
     sigma_comparison = build_ci_table({
         'Parametric': (parametric_sigma_lower, parametric_sigma_upper), # type: ignore
-        'Bootstrap': (CI_bootstrap.loc[tickers, 'sigma_lower'], CI_bootstrap.loc[tickers, 'sigma_upper']),
+        'Bootstrap (Percentile)': (CI_bootstrap.loc[tickers, 'sigma_lower_pct'], CI_bootstrap.loc[tickers, 'sigma_upper_pct']),
+        'Bootstrap (Pivotal)': (CI_bootstrap.loc[tickers, 'sigma_lower_piv'], CI_bootstrap.loc[tickers, 'sigma_upper_piv']),
         'Block Bootstrap': (CI_block_bootstrap.loc[tickers, 'sigma_lower'], CI_block_bootstrap.loc[tickers, 'sigma_upper']),
     })
     st.dataframe(sigma_comparison)
@@ -574,38 +686,48 @@ def visualize_data(output_path: str, MLE_params:pd.DataFrame, CI_parametric: pd.
 #################################################################################################################################
 def main():
     # define variables to be used
-    tickers = ['AAPL', 'MSFT', 'GOOGL', 'META', 'NVDA', 'AMZN', 'TSM', 'AVGO', 'IBM', 'ANET', 'APO', 'OWL', 'KKR', 'BX', 'ARES']
-    period_start = "2021-08-03"
-    period_end = "2026-08-03"
+    tech_tickers = ['AAPL', 'MSFT', 'GOOGL', 'META', 'NVDA', 'AMZN', 'TSM', 'AVGO', 'IBM', 'ANET']
+    alt_asset_tickers = ['APO', 'OWL', 'KKR', 'BX', 'ARES']
+    tickers = tech_tickers + alt_asset_tickers
+    period_start = "2011-08-25"
+    period_end = "2026-08-25"
     interval = "1d"
-    output_path = '/Users/thomascostin/Library/CloudStorage/OneDrive-Personal/00 Career Development/03 Interview Prep/01 Quantitative Research/03 Project/Equity_Return_Distributions/price_data/closing_prices.csv'
+    output_path = '/Users/thomascostin/Library/CloudStorage/OneDrive-Personal/00 Career Development/03 Interview Prep/01 Quantitative Research/03 Project/Equity_Return_Distributions/price_data/log_returns.csv'
     alpha = 0.05 # significance for confidence interval
     n_boot = 10000 # number of resamples
+    n_perm = 10000 # number of permutations for the sub-period mean return test
+    split_date = "2022-11-30" # ChatGPT release date, the sub-period split used in the README's rationale
     random_state = 1 # seed to be used with bootstrap to enable replication
 
-    # generate daily closing price data and cache local csv file
+    # generate daily log return data and cache local csv file
     get_data(tickers, period_start, period_end, interval, output_path)
 
-    # convert cached closing price data from csv to pandas DataFrame
-    closing_price_data = pd.read_csv(output_path, index_col=0, parse_dates=True)
+    # convert cached log return data from csv to pandas DataFrame
+    log_return_data = pd.read_csv(output_path, index_col=0, parse_dates=True)
 
     # compute Normal distribution parameters for each ticker using MLE
-    mle_params = MLE_fit(closing_price_data)
+    mle_params = MLE_fit(log_return_data)
 
     # generate parametric CI for the mean and variance of each ticker
     CI_parametric = parametric_CI(mle_params, alpha)
 
     # compute bootstrap CI for the mean and standard deviation of each ticker
-    CI_bootstrap = bootstrap_CI(closing_price_data, n_boot, alpha, random_state)
+    CI_bootstrap = bootstrap_CI(log_return_data, n_boot, alpha, random_state)
 
     # compute block bootstrap CI for the mean and standard deviation of each ticker
-    CI_block_bootstrap = block_bootstrap_CI(closing_price_data, n_boot, alpha, random_state)
+    CI_block_bootstrap = block_bootstrap_CI(log_return_data, n_boot, alpha, random_state)
 
     # run goodness of fit tests on each ticker's log return series
-    GoF = goodness_of_fit(closing_price_data, mle_params)
+    GoF = goodness_of_fit(log_return_data, mle_params, random_state)
+
+    # test whether each group's mean log return shifted between the pre- and
+    # post-split_date sub-periods (run separately so each group's family of
+    # tickers stands on its own rather than being pooled into one test)
+    permutation_tech = permutation_test(log_return_data[tech_tickers], split_date, n_perm, random_state)
+    permutation_alt = permutation_test(log_return_data[alt_asset_tickers], split_date, n_perm, random_state)
 
     # feed data into data visualization function
-    visualize_data(output_path, mle_params, CI_parametric, CI_bootstrap, CI_block_bootstrap, GoF)
+    visualize_data(output_path, mle_params, CI_parametric, CI_bootstrap, CI_block_bootstrap, GoF, split_date, permutation_tech, permutation_alt)
 
 #################################################################################################################################
 if __name__ == "__main__":
