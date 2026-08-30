@@ -14,8 +14,6 @@ The tickers we selected consist of ten technology companies that have invested h
 
 After gathering and cleaning our data, we examine the dataset visually using a histogram that compares actual density to implied PDF based on MLE parameters, quantile-quantile plot, and box-and-wisker plot. These visualizations support our assumption that none of the selected tickers have normally distributed returns, although Blackstone, Google, and Blue Owl diverge less significantly from the normal distribution than the others. The table of summary statistics presented below these visuals adds further credence to our assumption by showing that all tickers have positive excess kurtosis and non-zero skewness. We note that Blackstone, Google, and Blue Owl have less excess kurtosis than the other tickers, which is in agreement with our previous comment about those tickers diverging less from the normal distribution than others.
 
-Note: need to explain why we don't use chi-square GoF
-
 ## Requirements
 
 - Python 3.9+

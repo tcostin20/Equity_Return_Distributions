@@ -115,6 +115,7 @@ def parametric_CI(MLE_fit: pd.DataFrame, alpha: float) -> pd.DataFrame:
                          'var_upper': var_upper})
 
 #################################################################################################################################
+@st.cache_data
 def bootstrap_CI(data: pd.DataFrame, n_boot: int, alpha: float, random_state: int) -> pd.DataFrame:
     '''
     Function that generates non-parametric bootstrap confidence intervals for the mean and standard deviation of each 
@@ -181,6 +182,7 @@ def bootstrap_CI(data: pd.DataFrame, n_boot: int, alpha: float, random_state: in
     return pd.DataFrame.from_dict(results, orient='index')
 
 #################################################################################################################################
+@st.cache_data
 def block_bootstrap_CI(data:pd.DataFrame, n_boot: int, alpha: float, random_state: int) -> pd.DataFrame:
     '''
     Function that generates non-parametric block bootstrap confidence intervals for the mean and standard deviation of each 
@@ -242,6 +244,7 @@ def block_bootstrap_CI(data:pd.DataFrame, n_boot: int, alpha: float, random_stat
     return pd.DataFrame.from_dict(results, orient='index')
 
 #################################################################################################################################
+@st.cache_data
 def goodness_of_fit(data: pd.DataFrame, MLE_fit: pd.DataFrame, random_state: int) -> pd.DataFrame:
     '''
     Function that conducts several goodness of fit tests on the
@@ -282,6 +285,7 @@ def goodness_of_fit(data: pd.DataFrame, MLE_fit: pd.DataFrame, random_state: int
     return pd.DataFrame.from_dict(results, orient='index')
 
 #################################################################################################################################
+@st.cache_data
 def permutation_test(data: pd.DataFrame, split_date: str, n_perm: int, random_state: int) -> pd.DataFrame:
     '''
     Function that tests, for each ticker, whether the mean log return differs
@@ -534,23 +538,6 @@ def visualize_data(output_path: str, MLE_params:pd.DataFrame, CI_parametric: pd.
     st.altair_chart((qq_scatter + qq_reference_line).configure_view(strokeWidth=0), use_container_width=True)
     st.caption("Note: points on the dashed line indicate agreement with the fitted normal distribution; deviations in the tails indicate non-normality.")
 
-    # box-and-whisker plot of the selected ticker's daily log returns
-    box_data = pd.DataFrame({"log_return": selected_returns})
-
-    st.subheader(f"Daily Log Return Box Plot — {company_names[selected_ticker]}")
-    box_plot = (
-        alt.Chart(box_data)
-        .mark_boxplot(color=BAR_COLOR, size=50, outliers={"color": BAR_COLOR})
-        .encode(
-            x=alt.X("log_return:Q", title=None, axis=alt.Axis(
-                format="%", gridColor="#e1e0d9", domainColor="#c3c2b7",
-                tickColor="#c3c2b7", labelColor="#52514e", titleColor="#0b0b0b"))
-        )
-        .properties(height=200)
-        .configure_view(strokeWidth=0)
-    )
-    st.altair_chart(box_plot, use_container_width=True)
-
     # create daily log return summary statistics table
     st.subheader("Daily Log Return Summary Statistics")
     summary_stats = pd.DataFrame({
@@ -595,7 +582,7 @@ def visualize_data(output_path: str, MLE_params:pd.DataFrame, CI_parametric: pd.
         gof_columns[(test, 'Bonferroni p-Value')] = bonferroni_pvalue.map(lambda x: f"{x:.4f}")
     gof_summary = pd.DataFrame(gof_columns)
     st.dataframe(gof_summary)
-    st.caption("Note: standard p-values and Bonferroni p-values for Anderson-Darling appear identical because no practical Monte Carlo resample budget exists (i.e., the number of resamples required to generate accurate values is extreme).")
+    st.caption("Note: standard p-values and Bonferroni p-values for Anderson-Darling appear identical because no practical Monte Carlo resample budget exists (i.e., the number of resamples required to generate accurate values is extreme). Additionally, we note that the Kolmogorov-Smirnov goodness-of-fit test is inlcuded for completeness but that it typically performs poorly on data with fat tails.")
 
     # collapse permutation test results into a display-ready table
     def build_permutation_table(results: pd.DataFrame) -> pd.DataFrame:
